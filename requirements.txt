@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+httpx
+feedparser
+python-dotenv
+python-jose[cryptography]
+redis
+redis>=4.6.0
+descope

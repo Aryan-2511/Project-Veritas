@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+httpx
+feedparser
+python-dotenv
+python-jose[cryptography]
+redis
+aioredis

@@ -1,0 +1,67 @@
+services:
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+  rsshub:
+    image: diygod/rsshub:latest
+    container_name: veritas_rsshub
+    environment:
+      - NODE_ENV=production
+    ports:
+      - "1200:1200"
+
+  concierge:
+    build:
+      context: .
+      dockerfile: concierge/Dockerfile
+    container_name: veritas_concierge
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8080:8080"
+    depends_on:
+      - redis
+      - rsshub
+
+  scout:
+    build:
+      context: .
+      dockerfile: scout/Dockerfile
+    container_name: veritas_scout
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8001:8080"
+    depends_on:
+      - redis
+      - rsshub
+
+  analyst:
+    build:
+      context: .
+      dockerfile: analyst/Dockerfile
+    container_name: veritas_analyst
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8002:8080"
+    depends_on:
+      - redis
+
+  dispatcher:
+    build:
+      context: .
+      dockerfile: dispatcher/Dockerfile
+    container_name: veritas_dispatcher
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8003:8080"
+    depends_on:
+        - redis

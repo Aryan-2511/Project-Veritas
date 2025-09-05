@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+aioredis
+sqlite3-binary; python_version < '3.10'  # otherwise sqlite3 builtin
+python-dotenv
