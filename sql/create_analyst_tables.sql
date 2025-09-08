@@ -1,13 +1,15 @@
--- insights produced by Analyst
-PRAGMA foreign_keys = ON;
+DROP TABLE IF EXISTS insights;
 
 CREATE TABLE IF NOT EXISTS insights (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  insight_type TEXT NOT NULL,
+  insight_type TEXT,
   score REAL,
   summary TEXT,
-  evidence TEXT,      -- JSON string with evidence refs
-  user_id TEXT,       -- optional: who requested / the owner
+  evidence TEXT,
+  recommended_action TEXT,
+  raw_response TEXT,
+  subscription_id INTEGER,
+  user_id TEXT,
   created_at INTEGER
 );
 

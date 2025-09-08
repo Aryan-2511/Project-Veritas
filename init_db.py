@@ -13,13 +13,15 @@ DB_FILES = {
     "scout": DATA_DIR / "scout.db",
     "analyst": DATA_DIR / "analyst.db",
     "audit": DATA_DIR / "audit.db",
+    "dispatcher":DATA_DIR/"dispatcher.db",
 }
 
 # mapping which SQL files apply to which DB
 MIGRATIONS = {
     "scout": ["create_scout_tables.sql"],
     "analyst": ["create_analyst_tables.sql"],
-    "audit": ["create_audit_table.sql"]
+    "audit": ["create_audit_table.sql"],
+    "dispatcher":["create_dispatcher_tables.sql"]
 }
 
 def ensure_data_dir():

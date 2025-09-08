@@ -1,33 +1,76 @@
 # concierge/descope_client.py
 import os
-import httpx
+from typing import Any, Dict, Optional
+from dotenv import load_dotenv
+# Prefer the SDK import. The SDK exposes DescopeClient and AccessKeyLoginOptions.
 from descope import DescopeClient
-from typing import List, Optional
+load_dotenv()
 
-DESCOPE_PROJECT_ID = os.getenv("DESCOPE_PROJECT_ID")
-DESCOPE_BASE_URI = os.getenv("DESCOPE_BASE_URI", "https://api.descope.com")
-DESCOPE_TOKEN_EXCHANGE_URL = os.getenv("DESCOPE_TOKEN_EXCHANGE_URL")
-CONCIERGE_CLIENT_ID = os.getenv("DESCOPE_CONCIERGE_CLIENT_ID")
-CONCIERGE_CLIENT_SECRET = os.getenv("DESCOPE_CONCIERGE_CLIENT_SECRET")
-
-descope_client = DescopeClient(project_id=DESCOPE_PROJECT_ID, base_url=DESCOPE_BASE_URI)
-
-def validate_session_sync(session_token: str, audience: Optional[str] = None):
+# AccessKeyLoginOptions location may vary across small SDK versions.
+# Try import from top-level then fallback to models.
+try:
+    from descope import AccessKeyLoginOptions  # preferred if present
+except Exception:
     try:
-        return descope_client.validate_session(session_token=session_token, audience=audience)
-    except Exception as e:
-        raise RuntimeError(f"Session validation failed: {e}")
+        from descope.models import AccessKeyLoginOptions
+    except Exception:
+        AccessKeyLoginOptions = None  # we'll raise if missing when needed
 
-async def exchange_for_delegated_token(subject_token: str, audience: str, scopes: List[str], expires_in: int = 300) -> dict:
-    if not DESCOPE_TOKEN_EXCHANGE_URL:
-        raise RuntimeError("DESCOPE_TOKEN_EXCHANGE_URL not configured")
-    payload = {
-        "subject_token": subject_token,
-        "requested_audience": audience,
-        "requested_scope": " ".join(scopes),
-        "expires_in": expires_in
-    }
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.post(DESCOPE_TOKEN_EXCHANGE_URL, json=payload, auth=(CONCIERGE_CLIENT_ID, CONCIERGE_CLIENT_SECRET))
-        r.raise_for_status()
-        return r.json()
+# Environment
+PROJECT_ID = os.getenv("DESCOPE_PROJECT_ID")
+DESCOPE_BASE_URI = os.getenv("DESCOPE_BASE_URI", "https://api.descope.com")
+# Access Key (not management key) — must be created in Descope UI > Access Keys
+ACCESS_KEY = os.getenv("NEW_DESCOPE_KEY")
+
+if not PROJECT_ID:
+    raise RuntimeError("DESCOPE_PROJECT_ID environment variable is required for concierge service")
+
+# Initialize Descope SDK client
+# The SDK accepts 'project_id' and optionally a base_url param in newer versions.
+_client: Optional[DescopeClient] = None
+try:
+    _client = DescopeClient(project_id=PROJECT_ID)
+except Exception as e:
+    # If SDK initialization fails (rare), we still let the module import fail loudly where used.
+    raise
+
+def get_client() -> DescopeClient:
+    if _client is None:
+        raise RuntimeError("Descope client not initialized")
+    return _client
+
+def validate_session_sync(session_token: str) -> Dict[str, Any]:
+    """
+    Validate session token using Descope SDK.
+    Returns session claims dict on success; raises exception on failure.
+    """
+    client = get_client()
+    # SDK method per docs:
+    return client.validate_session(session_token)
+
+def exchange_access_key(access_key: str, audience: str, scopes: list[str], ttl_seconds: int = 300) -> Dict[str, Any]:
+    """
+    Build AccessKeyLoginOptions with required custom_claims and call SDK exchange_access_key.
+    Returns the SDK response (dict) containing the delegated jwt.
+    """
+    client = get_client()
+    if AccessKeyLoginOptions is None:
+        raise RuntimeError("AccessKeyLoginOptions not available in descope SDK version")
+
+    # Build custom claims as recommended in earlier examples:
+    custom_claims = {}
+    if audience:
+        custom_claims["aud"] = audience
+    if scopes:
+        # use "scope" or "scp" depending on your resource validation logic
+        custom_claims["scope"] = " ".join(scopes)
+    # Optionally include sub so the delegated token is tied to a user (some flows prefer it)
+    # Note: The SDK/userflow may set sub internally; we avoid overriding unless needed.
+
+    login_opts = AccessKeyLoginOptions(custom_claims=custom_claims)
+
+    # SDK signature: exchange_access_key(access_key=..., login_options=...)
+    resp = client.exchange_access_key(access_key=access_key, login_options=login_opts)
+
+    # resp typically includes a jwt field (or sessionJwt) depending on SDK
+    return resp

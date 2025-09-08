@@ -1,85 +1,167 @@
 # concierge/main.py
 import os
+import logging
+import traceback
+from typing import List, Optional
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException
+
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-import jwt as pyjwt
+
+# Descope SDK imports
 from descope import DescopeClient
+# AccessKeyLoginOptions path may differ across SDK versions
+try:
+    from descope import AccessKeyLoginOptions
+except Exception:
+    try:
+        from descope.models import AccessKeyLoginOptions
+    except Exception:
+        AccessKeyLoginOptions = None
 
 load_dotenv()
 
-app = FastAPI(title="veritas-concierge")
+# Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("concierge")
 
-# Init Descope client
-DESCOPE_PROJECT_ID = os.getenv("DESCOPE_PROJECT_ID")
-DESCOPE_CLIENT_ID = os.getenv("DESCOPE_CONCIERGE_CLIENT_ID")
-DESCOPE_CLIENT_SECRET = os.getenv("DESCOPE_CONCIERGE_CLIENT_SECRET")
-
-if not DESCOPE_PROJECT_ID or not DESCOPE_CLIENT_ID or not DESCOPE_CLIENT_SECRET:
-    raise RuntimeError("Missing Descope config (check env vars).")
-
-client = DescopeClient(project_id=DESCOPE_PROJECT_ID)
-
+# --- Config from env ---
+PROJECT_ID = os.getenv("DESCOPE_PROJECT_ID")
+ACCESS_KEY = os.getenv("NEW_DESCOPE_KEY")
+FRONTEND_ORIGINS = os.getenv("FRONTEND_ORIGINS", "http://localhost:5173").split(",")
 AUD_MAP = {
     "scout": os.getenv("AUD_SCOUT"),
     "analyst": os.getenv("AUD_ANALYST"),
     "dispatcher": os.getenv("AUD_DISPATCHER"),
 }
 
+if not PROJECT_ID:
+    raise RuntimeError("DESCOPE_PROJECT_ID is required in environment")
+
+if not ACCESS_KEY:
+    logger.warning("DESCOPE_ACCESS_KEY is not set — exchange_access_key will fail until provided")
+
+# Initialize Descope SDK client
+try:
+    descope_client = DescopeClient(project_id=PROJECT_ID)
+except Exception as e:
+    logger.exception("Failed to initialize DescopeClient: %s", e)
+    raise
+
+# --- FastAPI app ---
+app = FastAPI(title="veritas-concierge")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=FRONTEND_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 class DelegateRequest(BaseModel):
     target: str
-    scopes: list[str] = []
-    expires_in: int = 300
+    scopes: Optional[List[str]] = []
+    expires_in: Optional[int] = 300
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 
 @app.post("/delegate")
-async def delegate(req: DelegateRequest, authorization: str | None = Header(None)):
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing session token")
+async def delegate(req: Request, body: DelegateRequest):
+    """
+    Validate the frontend session token and exchange the server-side Access Key for
+    a delegated token targeted at the requested audience.
 
-    session_token = authorization.split(" ", 1)[1].strip()
+    Body: { "target": "<aud alias or full audience string>", "scopes": [...], "expires_in": 300 }
+    Header: Authorization: Bearer <session_token>
+    """
+    # Extract session token
+    auth_header = req.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
 
-    # Validate session token
+    session_token = auth_header.split(" ", 1)[1].strip()
+    if not session_token:
+        raise HTTPException(status_code=401, detail="Empty session token")
+
+    # Validate session via SDK
     try:
-        client.validate_session(session_token)
+        session_claims = descope_client.validate_session(session_token)
     except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Session invalid: {e}")
+        logger.exception("Session validation failed")
+        raise HTTPException(status_code=401, detail=f"Invalid session token: {e}")
 
-    audience = AUD_MAP.get(req.target)
-    if not audience:
-        raise HTTPException(status_code=400, detail="invalid target")
+    logger.info("Validated session for sub=%s", session_claims.get("sub"))
 
-    # Exchange for delegated token
+    # Resolve audience: allow passing friendly alias (e.g., "scout") or direct audience string
+    requested_target = body.target
+    if isinstance(requested_target, str) and requested_target in AUD_MAP and AUD_MAP[requested_target]:
+        audience = AUD_MAP[requested_target]
+    else:
+        # treat as literal audience string
+        audience = requested_target
+
+    logger.info("Requested audience resolved to: %s", audience)
+
+    if not audience or not isinstance(audience, str) or audience.strip() == "":
+        raise HTTPException(status_code=400, detail="Invalid audience (empty). Configure AUD_* env vars or pass full audience string.")
+
+    # Make sure Access Key is configured
+    if not ACCESS_KEY:
+        raise HTTPException(status_code=500, detail="Server misconfigured: DESCOPE_ACCESS_KEY missing")
+
+    # Build AccessKeyLoginOptions (do NOT set 'aud' inside custom_claims; pass audience param explicitly)
+    if AccessKeyLoginOptions is None:
+        # SDK version problem: user must install a compatible SDK
+        logger.error("AccessKeyLoginOptions not available from installed descope SDK")
+        raise HTTPException(status_code=500, detail="Server error: Descope SDK incompatible (missing AccessKeyLoginOptions)")
+
+    custom_claims = {}
+    if body.scopes:
+        # Put scopes in custom claim (server will instruct SDK to include under nsec scope)
+        custom_claims["scope"] = " ".join(body.scopes)
+    custom_claims["aud"]=audience
+
+    login_opts = AccessKeyLoginOptions(custom_claims=custom_claims)
+
+    # Call the SDK exchange_access_key with explicit audience argument.
     try:
-        token_resp = client.mgmt.jwt().exchange_token(
-            login_token=session_token,
-            target_audience=audience,
-            scopes=req.scopes,
-            expiration=req.expires_in,
-        )
+        logger.info("Calling exchange_access_key with audience=%s scopes=%s", audience, custom_claims.get("scope"))
+        sdk_resp = descope_client.exchange_access_key(access_key=ACCESS_KEY, audience=audience, login_options=login_opts)
+        # sdk_resp typically contains sessionToken/jwt and other fields; return to caller
+        logger.info("Descope exchange_access_key succeeded")
+        return sdk_resp
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Delegation failed: {e}")
-
-    # optional: decode token for audit convenience
-    token = token_resp.get("sessionJwt") or token_resp.get("access_token")
-    if token:
-        try:
-            claims = pyjwt.decode(token, options={"verify_signature": False})
-            print(
-                "Delegation audit:",
-                {
-                    "user": claims.get("sub"),
-                    "aud": claims.get("aud"),
-                    "scope": claims.get("scope"),
-                    "jti": claims.get("jti"),
-                },
+        # Provide helpful error when audience is invalid
+        tb = traceback.format_exc()
+        logger.error("exchange_access_key exception: %s\n%s", e, tb)
+        msg = str(e)
+        if "audience" in msg.lower() or "invalid audience" in msg.lower():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Delegation failed: Invalid audience '{audience}'. Ensure AUD_* env var matches Descope Inbound App audience and Access Key permissions.",
             )
-        except Exception:
-            pass
+        # else generic 500
+        raise HTTPException(status_code=500, detail=f"Delegation failed: {msg}")
 
-    return token_resp
+
+# Optional: quick debug endpoint to show resolved env values (DO NOT expose in prod)
+@app.get("/_debug/env")
+async def debug_env():
+    masked_key = (ACCESS_KEY[:6] + "...") if ACCESS_KEY else "<missing>"
+    return {
+        "project_id": PROJECT_ID,
+        "access_key": masked_key,
+        "aud_map": {k: (v if v else "<not set>") for k, v in AUD_MAP.items()},
+        "frontend_origins": FRONTEND_ORIGINS,
+    }
 
 
 if __name__ == "__main__":

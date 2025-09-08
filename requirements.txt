@@ -4,6 +4,13 @@ httpx
 feedparser
 python-dotenv
 python-jose[cryptography]
-redis
 redis>=4.6.0
 descope
+groq
+PyJWT
+aiosmtplib
+pydantic
+email-validator
+python-multipart      # if file/form uploads later
+typing-extensions
+pytest
