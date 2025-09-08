@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import redis
 import threading
+# from fastapi.middleware.cors import CORSMiddleware
 
 # === Config ===
 DISPATCHER_DB = "data/dispatcher.db"

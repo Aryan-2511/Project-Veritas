@@ -10,6 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
+from .descope_client import validate_session_sync, exchange_access_key_for_audience
+
+load_dotenv()
 # Descope SDK imports
 from descope import DescopeClient
 # AccessKeyLoginOptions path may differ across SDK versions
@@ -21,38 +24,29 @@ except Exception:
     except Exception:
         AccessKeyLoginOptions = None
 
-load_dotenv()
-
-# Logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("concierge")
+logging.basicConfig(level=logging.INFO)
 
-# --- Config from env ---
 PROJECT_ID = os.getenv("DESCOPE_PROJECT_ID")
-ACCESS_KEY = os.getenv("NEW_DESCOPE_KEY")
+ACCESS_KEY = os.getenv("NEW_DESCOPE_KEY") 
 FRONTEND_ORIGINS = os.getenv("FRONTEND_ORIGINS", "http://localhost:5173").split(",")
+# Friendly name -> audience mapping (set env vars AUD_SCOUT etc to inbound app audience IDs)
 AUD_MAP = {
     "scout": os.getenv("AUD_SCOUT"),
     "analyst": os.getenv("AUD_ANALYST"),
     "dispatcher": os.getenv("AUD_DISPATCHER"),
+    "moderator": os.getenv("AUD_MODERATOR"),
 }
 
 if not PROJECT_ID:
     raise RuntimeError("DESCOPE_PROJECT_ID is required in environment")
-
-if not ACCESS_KEY:
-    logger.warning("DESCOPE_ACCESS_KEY is not set — exchange_access_key will fail until provided")
-
 # Initialize Descope SDK client
 try:
-    descope_client = DescopeClient(project_id=PROJECT_ID)
+    descope_client = DescopeClient(project_id=PROJECT_ID, jwt_validation_leeway=60)
 except Exception as e:
     logger.exception("Failed to initialize DescopeClient: %s", e)
     raise
-
-# --- FastAPI app ---
 app = FastAPI(title="veritas-concierge")
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=FRONTEND_ORIGINS,
@@ -61,12 +55,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 class DelegateRequest(BaseModel):
     target: str
     scopes: Optional[List[str]] = []
     expires_in: Optional[int] = 300
-
+    subscription_id: Optional[int] = None  # added to store token for this subscription
 
 @app.get("/health")
 async def health():
@@ -137,6 +130,17 @@ async def delegate(req: Request, body: DelegateRequest):
         sdk_resp = descope_client.exchange_access_key(access_key=ACCESS_KEY, audience=audience, login_options=login_opts)
         # sdk_resp typically contains sessionToken/jwt and other fields; return to caller
         logger.info("Descope exchange_access_key succeeded")
+        # --------------------------
+        # Store moderator token in Redis for subscription
+        # --------------------------
+        if body.subscription_id and requested_target == "moderator":
+            token_to_store = sdk_resp.get("sessionToken") or sdk_resp.get("jwt")
+            if token_to_store:
+                r = await get_redis()
+                key = f"subscription:{body.subscription_id}:moderator_token"
+                await r.set(key, token_to_store, ex=body.expires_in or 300)
+                logger.info(f"Stored moderator token in Redis for subscription {body.subscription_id}")
+
         return sdk_resp
     except Exception as e:
         # Provide helpful error when audience is invalid
@@ -152,7 +156,6 @@ async def delegate(req: Request, body: DelegateRequest):
         raise HTTPException(status_code=500, detail=f"Delegation failed: {msg}")
 
 
-# Optional: quick debug endpoint to show resolved env values (DO NOT expose in prod)
 @app.get("/_debug/env")
 async def debug_env():
     masked_key = (ACCESS_KEY[:6] + "...") if ACCESS_KEY else "<missing>"
@@ -163,6 +166,6 @@ async def debug_env():
         "frontend_origins": FRONTEND_ORIGINS,
     }
 
-
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
+    uvicorn.run("concierge.main:app", host="0.0.0.0", port=int(os.getenv("CONCIERGE_PORT", "8080")), reload=True)
+

@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from dotenv import load_dotenv
 import redis.asyncio as redis
 from groq import Groq  # ✅ official Groq client
+from fastapi.middleware.cors import CORSMiddleware
 
 from common.audit import audit_insert
 
@@ -31,6 +32,15 @@ if not GROQ_API_KEY:
     print("[analyst] WARNING: GROQ_API_KEY not set. LLM calls will fail until configured.")
 
 app = FastAPI(title="veritas-analyst")
+
+# ✅ Allow frontend (Vite dev server)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],  # or ["*"] for dev
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Groq client (sync — run in executor for async)
 groq_client = Groq(api_key=GROQ_API_KEY)
@@ -337,8 +347,14 @@ def get_insights(limit: int = 50):
 
 @app.post("/analyze_now/{item_id}")
 async def analyze_now(item_id: int):
-    item = load_item(item_id)
-    if not item:
-        raise HTTPException(status_code=404, detail="item not found")
-    await process_item({"item_id": item_id, "subscription_id": item.get("subscription_id")})
+    # Check moderation
+    conn = sqlite3.connect(SCOUT_DB, timeout=30, check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute("SELECT allowed FROM moderated_items WHERE item_id = ?", (item_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row or not row[0]:
+        raise HTTPException(status_code=403, detail="Item not approved by moderator")
+
+    await process_item({"item_id": item_id, "subscription_id": None})
     return {"status": "processed", "item_id": item_id}

@@ -1,9 +1,13 @@
+
 services:
   redis:
     image: redis:7
     restart: unless-stopped
     ports:
       - "6379:6379"
+    volumes:
+      - redis-data:/data
+    env_file: .env
 
   rsshub:
     image: diygod/rsshub:latest
@@ -13,6 +17,7 @@ services:
       - NODE_ENV=production
     ports:
       - "1200:1200"
+    restart: unless-stopped
 
   concierge:
     build:
@@ -20,8 +25,6 @@ services:
       dockerfile: concierge/Dockerfile
     container_name: veritas_concierge
     env_file: .env
-    environment:
-      - REDIS_URL=redis://redis:6379/0
     volumes:
       - ./data:/app/data
     ports:
@@ -29,6 +32,7 @@ services:
     depends_on:
       - redis
       - rsshub
+    restart: unless-stopped
 
   scout:
     build:
@@ -36,9 +40,6 @@ services:
       dockerfile: scout/Dockerfile
     container_name: veritas_scout
     env_file: .env
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - RSSHUB_BASE=http://rsshub:1200
     volumes:
       - ./data:/app/data
     ports:
@@ -46,6 +47,8 @@ services:
     depends_on:
       - redis
       - rsshub
+      - concierge
+    restart: unless-stopped
 
   analyst:
     build:
@@ -53,14 +56,28 @@ services:
       dockerfile: analyst/Dockerfile
     container_name: veritas_analyst
     env_file: .env
-    environment:
-      - REDIS_URL=redis://redis:6379/0
     volumes:
       - ./data:/app/data
     ports:
       - "8002:8080"
     depends_on:
       - redis
+    restart: unless-stopped
+
+  moderator:
+    build:
+      context: .
+      dockerfile: moderator/Dockerfile
+    container_name: veritas_moderator
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8004:8080"
+    depends_on:
+      - redis
+      - concierge
+    restart: unless-stopped
 
   dispatcher:
     build:
@@ -68,8 +85,6 @@ services:
       dockerfile: dispatcher/Dockerfile
     container_name: veritas_dispatcher
     env_file: .env
-    environment:
-      - REDIS_URL=redis://redis:6379/0
     volumes:
       - ./data:/app/data
     ports:
@@ -77,3 +92,7 @@ services:
     depends_on:
       - redis
       - analyst
+    restart: unless-stopped
+
+volumes:
+  redis-data:
